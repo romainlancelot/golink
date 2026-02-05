@@ -1,0 +1,21 @@
+[Unit]
+Description=Go Links URL Shortener
+After=network.target pihole-FTL.service
+Wants=pihole-FTL.service
+
+[Service]
+Type=simple
+# Root is required to bind to port 80
+User=root
+WorkingDirectory=/opt/golink
+EnvironmentFile=-/opt/golink/.env
+ExecStart=/usr/local/bin/golink
+Restart=always
+RestartSec=5
+
+# Security hardening (optional)
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

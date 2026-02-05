@@ -1,0 +1,25 @@
+# Binary
+golink
+
+# Environment configuration
+.env
+
+# Database
+go_links.json
+go_links.json.backup
+
+# Go build cache
+*.o
+*.a
+*.so
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
