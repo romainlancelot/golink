@@ -5,6 +5,8 @@ A lightweight URL shortener that runs on your Raspberry Pi alongside Pi-hole v6.
 ## Features
 
 - 🔗 Custom short links with a simple web interface
+- ✏️ Edit and delete links directly from the interface
+- 📊 Alphabetically sorted link list
 - 🔄 Pi-hole v6 transparent proxy (optional)
 - 💾 Persistent JSON storage
 - 🚀 Fast and lightweight (single binary)
@@ -121,6 +123,17 @@ sudo systemctl restart golink
 3. Enter URL (e.g., `https://youtube.com`)
 4. Click "Create"
 
+**Edit a link:**
+
+1. Click the "Edit" button next to the link
+2. Modify the URL
+3. Click "Save"
+
+**Delete a link:**
+
+1. Click the "Delete" button next to the link
+2. Confirm the deletion
+
 **Use your link:**
 
 - Navigate to `http://go/yt`
@@ -128,6 +141,8 @@ sudo systemctl restart golink
 **Auto-create links:**
 
 - Type `http://go/newlink` - if it doesn't exist, you'll be redirected to the creation form with the name pre-filled
+
+**Note:** Links are displayed in alphabetical order for easy browsing.
 
 ---
 

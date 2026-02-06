@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -57,6 +58,26 @@ func (s *linkStore) set(key, value string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.links[key] = value
+}
+
+func (s *linkStore) delete(key string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.links[key]; exists {
+		delete(s.links, key)
+		return true
+	}
+	return false
+}
+
+func (s *linkStore) update(key, newValue string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.links[key]; exists {
+		s.links[key] = newValue
+		return true
+	}
+	return false
 }
 
 func (s *linkStore) getAll() map[string]string {
@@ -176,6 +197,7 @@ func main() {
 func handleGo(w http.ResponseWriter, r *http.Request, store *linkStore, dbFile string) {
 	path := strings.Trim(r.URL.Path, "/")
 
+	// Home page with interface
 	if path == "" {
 		if r.Method == http.MethodPost {
 			createLink(w, r, store, dbFile)
@@ -185,6 +207,13 @@ func handleGo(w http.ResponseWriter, r *http.Request, store *linkStore, dbFile s
 		return
 	}
 
+	// API endpoints for link management
+	if strings.HasPrefix(path, "api/") {
+		handleAPI(w, r, path, store, dbFile)
+		return
+	}
+
+	// Redirect to destination
 	dest, exists := store.get(path)
 	if exists {
 		logger.Info("redirecting", "key", path, "destination", dest)
@@ -192,6 +221,97 @@ func handleGo(w http.ResponseWriter, r *http.Request, store *linkStore, dbFile s
 	} else {
 		logger.Info("link not found", "key", path)
 		http.Redirect(w, r, "/?key="+url.QueryEscape(path), http.StatusTemporaryRedirect)
+	}
+}
+
+func handleAPI(w http.ResponseWriter, r *http.Request, path string, store *linkStore, dbFile string) {
+	// Extract key from path (api/delete/key or api/update/key)
+	parts := strings.Split(path, "/")
+	if len(parts) < 3 {
+		http.Error(w, "Invalid API path", http.StatusBadRequest)
+		return
+	}
+
+	action := parts[1]
+	key := parts[2]
+
+	switch action {
+	case "delete":
+		deleteLink(w, r, key, store, dbFile)
+	case "update":
+		updateLink(w, r, key, store, dbFile)
+	default:
+		http.Error(w, "Unknown API action", http.StatusNotFound)
+	}
+}
+
+func deleteLink(w http.ResponseWriter, r *http.Request, key string, store *linkStore, dbFile string) {
+	if r.Method != http.MethodPost && r.Method != http.MethodDelete {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if !store.delete(key) {
+		http.Error(w, "Link not found", http.StatusNotFound)
+		return
+	}
+
+	if err := saveLinks(dbFile, store); err != nil {
+		logger.Error("failed to save links after deletion", "error", err)
+		http.Error(w, "Failed to save changes", http.StatusInternalServerError)
+		return
+	}
+
+	logger.Info("deleted link", "key", key)
+
+	if r.Method == http.MethodPost {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+	} else {
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+func updateLink(w http.ResponseWriter, r *http.Request, key string, store *linkStore, dbFile string) {
+	if r.Method != http.MethodPost && r.Method != http.MethodPut {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	urlStr := strings.TrimSpace(r.FormValue("url"))
+	if urlStr == "" {
+		http.Error(w, "Missing URL", http.StatusBadRequest)
+		return
+	}
+
+	if len(urlStr) > maxURLLength {
+		http.Error(w, "URL too long", http.StatusBadRequest)
+		return
+	}
+
+	// Validate URL
+	parsedURL, err := url.Parse(urlStr)
+	if err != nil || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") {
+		http.Error(w, "Invalid URL (must be http or https)", http.StatusBadRequest)
+		return
+	}
+
+	if !store.update(key, urlStr) {
+		http.Error(w, "Link not found", http.StatusNotFound)
+		return
+	}
+
+	if err := saveLinks(dbFile, store); err != nil {
+		logger.Error("failed to save links after update", "error", err)
+		http.Error(w, "Failed to save changes", http.StatusInternalServerError)
+		return
+	}
+
+	logger.Info("updated link", "key", key, "url", urlStr)
+
+	if r.Method == http.MethodPost {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+	} else {
+		w.WriteHeader(http.StatusNoContent)
 	}
 }
 
@@ -242,6 +362,16 @@ func showInterface(w http.ResponseWriter, r *http.Request, store *linkStore) {
 	w.Write([]byte(renderHTML(preKey, links)))
 }
 
+// sortedKeys returns map keys in alphabetical order
+func sortedKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
 func renderHTML(prefilledKey string, links map[string]string) string {
 	output := `<!DOCTYPE html>
 <html lang="en">
@@ -250,14 +380,43 @@ func renderHTML(prefilledKey string, links map[string]string) string {
     <title>Go Links</title>
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <style>
-        body{font-family:system-ui,-apple-system,sans-serif;max-width:600px;margin:2rem auto;padding:1rem;background:#f4f4f9}
+        body{font-family:system-ui,-apple-system,sans-serif;max-width:900px;margin:2rem auto;padding:1rem;background:#f4f4f9}
         .card{background:#fff;padding:1.5rem;border-radius:8px;box-shadow:0 2px 5px #0000001a;margin-bottom:1.5rem}
         input{width:100%;padding:10px;margin:5px 0 15px;border:1px solid #ddd;border-radius:4px;box-sizing:border-box}
         button{background:#007bff;color:#fff;border:none;padding:10px;border-radius:4px;cursor:pointer;width:100%;font-size:1rem}
-        ul{list-style:none;padding:0}
-        li{padding:10px;border-bottom:1px solid #eee;display:flex;justify-content:space-between;align-items:center}
-        a{color:#007bff;text-decoration:none;font-weight:700}
-        .key{font-family:monospace;background:#f0f0f0;padding:2px 6px;border-radius:3px}
+        button:hover{background:#0056b3}
+        
+        table{width:100%;border-collapse:collapse;margin-top:1rem}
+        thead{background:#f8f9fa;border-bottom:2px solid #dee2e6}
+        th{padding:12px;text-align:left;font-weight:600;color:#495057;font-size:0.9rem;text-transform:uppercase;letter-spacing:0.5px}
+        tbody tr{border-bottom:1px solid #dee2e6;transition:background 0.2s}
+        tbody tr:hover{background:#f8f9fa}
+        td{padding:12px;vertical-align:middle}
+        
+        .shortcut-cell{font-family:monospace;background:#e9ecef;padding:4px 8px;border-radius:4px;display:inline-block;font-size:0.95rem;font-weight:600;color:#495057}
+        .url-cell{color:#6c757d;font-size:0.9rem;max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+        .url-cell a{color:#007bff;text-decoration:none;transition:color 0.2s}
+        .url-cell a:hover{color:#0056b3;text-decoration:underline}
+        .actions-cell{display:flex;gap:8px;justify-content:flex-end}
+        
+        .btn-edit,.btn-delete{font-size:0.85rem;padding:6px 12px;cursor:pointer;border:1px solid;border-radius:4px;background:transparent;transition:all 0.2s;font-weight:500}
+        .btn-edit{color:#28a745;border-color:#28a745}
+        .btn-edit:hover{background:#28a745;color:#fff}
+        .btn-delete{color:#dc3545;border-color:#dc3545}
+        .btn-delete:hover{background:#dc3545;color:#fff}
+        
+        .edit-row{display:none}
+        .edit-row td{background:#f8f9fa;padding:15px}
+        .edit-form{display:flex;gap:10px;align-items:center}
+        .edit-form input{margin:0;padding:10px;flex:1}
+        .edit-form button{width:auto;padding:8px 16px;font-size:0.9rem;margin:0}
+        .edit-form .btn-save{background:#28a745;border:none}
+        .edit-form .btn-save:hover{background:#218838}
+        .edit-form .btn-cancel{background:#6c757d;border:none}
+        .edit-form .btn-cancel:hover{background:#5a6268}
+        
+        .empty-state{text-align:center;padding:3rem 1rem;color:#6c757d}
+        .empty-state-icon{font-size:3rem;margin-bottom:1rem;opacity:0.5}
     </style>
 </head>
 <body>
@@ -276,18 +435,109 @@ func renderHTML(prefilledKey string, links map[string]string) string {
         <h2>Shortcuts</h2>`
 
 	if len(links) == 0 {
-		output += `<p style="text-align:center;color:#666">No links yet.</p>`
+		output += `<div class="empty-state">
+            <div class="empty-state-icon">🔗</div>
+            <p>No links yet. Create your first shortcut above!</p>
+        </div>`
 	} else {
-		output += `<ul>`
-		for k, v := range links {
+		output += `<table>
+            <thead>
+                <tr>
+                    <th>Shortcut</th>
+                    <th>Destination</th>
+                    <th style="text-align:right">Actions</th>
+                </tr>
+            </thead>
+            <tbody>`
+		
+		sortedKeys := sortedKeys(links)
+		for _, k := range sortedKeys {
+			v := links[k]
 			escK := html.EscapeString(k)
 			escV := html.EscapeString(v)
-			output += fmt.Sprintf(`<li><span>go/<span class="key">%s</span></span><a href="%s" target="_blank">➜</a></li>`, escK, escV)
+			output += fmt.Sprintf(`
+                <tr id="row-%s">
+                    <td><span class="shortcut-cell">go/%s</span></td>
+                    <td class="url-cell"><a href="%s" target="_blank" title="%s">%s</a></td>
+                    <td class="actions-cell">
+                        <button class="btn-edit" onclick="editLink('%s')">✏️ Edit</button>
+                        <button class="btn-delete" onclick="deleteLink('%s')">🗑️ Delete</button>
+                    </td>
+                </tr>
+                <tr id="edit-%s" class="edit-row">
+                    <td colspan="3">
+                        <form class="edit-form" onsubmit="return updateLink('%s', event)">
+                            <strong>go/%s</strong>
+                            <input type="url" name="url" value="%s" required placeholder="https://...">
+                            <button type="submit" class="btn-save">💾 Save</button>
+                            <button type="button" class="btn-cancel" onclick="cancelEdit('%s')">✖️ Cancel</button>
+                        </form>
+                    </td>
+                </tr>`, escK, escK, escV, escV, escV, escK, escK, escK, escK, escK, escV, escK)
 		}
-		output += `</ul>`
+		output += `
+            </tbody>
+        </table>`
 	}
 
-	output += `</div>
+	output += `    </div>
+    <script>
+        function editLink(key) {
+            const row = document.getElementById('row-' + key);
+            const editRow = document.getElementById('edit-' + key);
+            row.style.display = 'none';
+            editRow.style.display = 'table-row';
+        }
+        
+        function cancelEdit(key) {
+            const row = document.getElementById('row-' + key);
+            const editRow = document.getElementById('edit-' + key);
+            row.style.display = 'table-row';
+            editRow.style.display = 'none';
+        }
+        
+        function updateLink(key, event) {
+            event.preventDefault();
+            const form = event.target;
+            const url = form.url.value;
+            const formData = new FormData();
+            formData.append('url', url);
+            
+            fetch('/api/update/' + encodeURIComponent(key), {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => {
+                if (response.ok) {
+                    window.location.reload();
+                } else {
+                    alert('Failed to update link');
+                }
+            })
+            .catch(error => {
+                alert('Error: ' + error);
+            });
+            return false;
+        }
+        
+        function deleteLink(key) {
+            if (!confirm('Delete link "' + key + '"?')) return;
+            
+            fetch('/api/delete/' + encodeURIComponent(key), {
+                method: 'POST'
+            })
+            .then(response => {
+                if (response.ok) {
+                    window.location.reload();
+                } else {
+                    alert('Failed to delete link');
+                }
+            })
+            .catch(error => {
+                alert('Error: ' + error);
+            });
+        }
+    </script>
 </body>
 </html>`
 
