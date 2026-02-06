@@ -5,15 +5,19 @@ Wants=pihole-FTL.service
 
 [Service]
 Type=simple
-# Root is required to bind to port 80
 User=root
 WorkingDirectory=/opt/golink
-EnvironmentFile=-/opt/golink/.env
 ExecStart=/usr/local/bin/golink
 Restart=always
 RestartSec=5
 
-# Security hardening (optional)
+# Environment configuration (optional, defaults work for most setups)
+# Uncomment and modify if needed:
+# Environment="PIHOLE_TARGET=http://127.0.0.1:8080"
+# Environment="LISTEN_ADDR=:80"
+# Environment="DB_FILE=go_links.json"
+
+# Security hardening
 NoNewPrivileges=true
 PrivateTmp=true
 

@@ -1,11 +1,11 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
 	"html"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httputil"
@@ -19,70 +19,122 @@ import (
 	"time"
 )
 
-// Configuration with environment variable fallbacks
-var (
-	piholeTarget = getEnv("PIHOLE_TARGET", "http://127.0.0.1:8080")
-	listenAddr   = getEnv("LISTEN_ADDR", ":80")
-	dbFile       = getEnv("DB_FILE", "go_links.json")
-)
-
 const (
-	maxKeyLength   = 50
-	maxURLLength   = 2048
+	defaultPiholeTarget = "http://127.0.0.1:8080"
+	defaultListenAddr   = ":80"
+	defaultDBFile       = "go_links.json"
+
+	maxKeyLength    = 50
+	maxURLLength    = 2048
 	shutdownTimeout = 5 * time.Second
 )
 
 var (
-	// Valid key format: alphanumeric, hyphens, underscores
 	validKeyRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
-	
-	store = struct {
-		sync.RWMutex
-		Links map[string]string
-	}{Links: make(map[string]string)}
-	
-	logger *slog.Logger
+	logger        *slog.Logger
 )
 
+// linkStore manages the thread-safe storage of links
+type linkStore struct {
+	mu    sync.RWMutex
+	links map[string]string
+}
+
+func newLinkStore() *linkStore {
+	return &linkStore{
+		links: make(map[string]string),
+	}
+}
+
+func (s *linkStore) get(key string) (string, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	val, exists := s.links[key]
+	return val, exists
+}
+
+func (s *linkStore) set(key, value string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.links[key] = value
+}
+
+func (s *linkStore) getAll() map[string]string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	// Return a copy to avoid external modification
+	copy := make(map[string]string, len(s.links))
+	for k, v := range s.links {
+		copy[k] = v
+	}
+	return copy
+}
+
+func (s *linkStore) load(data map[string]string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.links = data
+}
+
+// config holds application configuration
+type config struct {
+	piholeTarget string
+	listenAddr   string
+	dbFile       string
+}
+
+func loadConfig() config {
+	return config{
+		piholeTarget: getEnv("PIHOLE_TARGET", defaultPiholeTarget),
+		listenAddr:   getEnv("LISTEN_ADDR", defaultListenAddr),
+		dbFile:       getEnv("DB_FILE", defaultDBFile),
+	}
+}
+
+func getEnv(key, fallback string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return fallback
+}
+
 func main() {
-	// Load .env file if it exists
-	loadEnvFile(".env")
-	
-	// Setup structured logging
 	logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	}))
-	
-	// Load existing links from storage
-	if err := loadLinks(); err != nil {
-		logger.Error("Failed to load links", "error", err)
-		// Continue running even if load fails (file might not exist yet)
+
+	cfg := loadConfig()
+	store := newLinkStore()
+
+	// Load existing links
+	if err := loadLinks(cfg.dbFile, store); err != nil {
+		logger.Error("failed to load links", "error", err)
 	}
 
-	// Setup proxy to Pi-hole
-	targetURL, err := url.Parse(piholeTarget)
+	// Parse and validate Pi-hole target URL
+	targetURL, err := url.Parse(cfg.piholeTarget)
 	if err != nil {
-		logger.Error("Invalid Pi-hole target URL", "url", piholeTarget, "error", err)
+		logger.Error("invalid Pi-hole target URL", "url", cfg.piholeTarget, "error", err)
 		os.Exit(1)
 	}
-	proxy := httputil.NewSingleHostReverseProxy(targetURL)
 
 	// Setup HTTP handlers
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		host := strings.Split(r.Host, ":")[0]
+	mux := http.NewServeMux()
+	proxy := httputil.NewSingleHostReverseProxy(targetURL)
 
-		// If domain is "go", handle short link redirection
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		host := strings.Split(r.Host, ":")[0]
 		if host == "go" || host == "go.local" {
-			handleGo(w, r)
+			handleGo(w, r, store, cfg.dbFile)
 		} else {
-			// Otherwise, proxy to Pi-hole (transparent proxy)
 			proxy.ServeHTTP(w, r)
 		}
 	})
 
-	// Configure HTTP server with timeouts
+	// Configure server with reasonable timeouts
 	srv := &http.Server{
-		Addr:         listenAddr,
+		Addr:         cfg.listenAddr,
+		Handler:      mux,
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 10 * time.Second,
 		IdleTimeout:  120 * time.Second,
@@ -90,9 +142,9 @@ func main() {
 
 	// Start server in goroutine
 	go func() {
-		logger.Info("Starting Go Links service", "addr", listenAddr, "pihole", piholeTarget)
+		logger.Info("starting server", "addr", cfg.listenAddr, "pihole", cfg.piholeTarget)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Error("Server failed", "error", err)
+			logger.Error("server failed", "error", err)
 			os.Exit(1)
 		}
 	}()
@@ -102,11 +154,11 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	logger.Info("Shutting down server gracefully...")
+	logger.Info("shutting down server...")
 
 	// Save links before shutdown
-	if err := saveLinks(); err != nil {
-		logger.Error("Failed to save links during shutdown", "error", err)
+	if err := saveLinks(cfg.dbFile, store); err != nil {
+		logger.Error("failed to save links during shutdown", "error", err)
 	}
 
 	// Graceful shutdown with timeout
@@ -114,230 +166,171 @@ func main() {
 	defer cancel()
 
 	if err := srv.Shutdown(ctx); err != nil {
-		logger.Error("Server forced to shutdown", "error", err)
+		logger.Error("server forced to shutdown", "error", err)
 		os.Exit(1)
 	}
 
-	logger.Info("Server stopped")
+	logger.Info("server stopped")
 }
 
-func handleGo(w http.ResponseWriter, r *http.Request) {
+func handleGo(w http.ResponseWriter, r *http.Request, store *linkStore, dbFile string) {
 	path := strings.Trim(r.URL.Path, "/")
-	
-	// Home page (management interface)
+
 	if path == "" {
 		if r.Method == http.MethodPost {
-			createLink(w, r)
+			createLink(w, r, store, dbFile)
 			return
 		}
-		showInterface(w, r)
+		showInterface(w, r, store)
 		return
 	}
 
-	// Perform redirection
-	store.RLock()
-	dest, exists := store.Links[path]
-	store.RUnlock()
-
+	dest, exists := store.get(path)
 	if exists {
-		logger.Info("Redirecting", "key", path, "destination", dest)
+		logger.Info("redirecting", "key", path, "destination", dest)
 		http.Redirect(w, r, dest, http.StatusFound)
 	} else {
-		// Link not found: suggest creating it
-		logger.Info("Link not found, suggesting creation", "key", path)
+		logger.Info("link not found", "key", path)
 		http.Redirect(w, r, "/?key="+url.QueryEscape(path), http.StatusTemporaryRedirect)
 	}
 }
 
-func createLink(w http.ResponseWriter, r *http.Request) {
+func createLink(w http.ResponseWriter, r *http.Request, store *linkStore, dbFile string) {
 	key := strings.TrimSpace(r.FormValue("key"))
 	urlStr := strings.TrimSpace(r.FormValue("url"))
 
-	// Validate key
-	if key == "" {
-		http.Error(w, "Key cannot be empty", http.StatusBadRequest)
+	// Validate inputs
+	if key == "" || urlStr == "" {
+		http.Error(w, "Missing key or URL", http.StatusBadRequest)
 		return
 	}
-	if len(key) > maxKeyLength {
-		http.Error(w, fmt.Sprintf("Key too long (max %d characters)", maxKeyLength), http.StatusBadRequest)
+	if len(key) > maxKeyLength || len(urlStr) > maxURLLength {
+		http.Error(w, "Input too long", http.StatusBadRequest)
 		return
 	}
 	if !validKeyRegex.MatchString(key) {
-		http.Error(w, "Key must contain only alphanumeric characters, hyphens, and underscores", http.StatusBadRequest)
+		http.Error(w, "Invalid key characters (use alphanumeric, hyphens, underscores)", http.StatusBadRequest)
 		return
 	}
 
 	// Validate URL
-	if urlStr == "" {
-		http.Error(w, "URL cannot be empty", http.StatusBadRequest)
-		return
-	}
-	if len(urlStr) > maxURLLength {
-		http.Error(w, fmt.Sprintf("URL too long (max %d characters)", maxURLLength), http.StatusBadRequest)
-		return
-	}
-	
 	parsedURL, err := url.Parse(urlStr)
 	if err != nil || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") {
 		http.Error(w, "Invalid URL (must be http or https)", http.StatusBadRequest)
 		return
 	}
 
-	// Store the link
-	store.Lock()
-	store.Links[key] = urlStr
-	if err := saveLinks(); err != nil {
-		store.Unlock()
-		logger.Error("Failed to save links", "error", err)
+	// Store link
+	store.set(key, urlStr)
+
+	// Save to disk
+	if err := saveLinks(dbFile, store); err != nil {
+		logger.Error("failed to save links", "error", err)
 		http.Error(w, "Failed to save link", http.StatusInternalServerError)
 		return
 	}
-	store.Unlock()
 
-	logger.Info("Created link", "key", key, "url", urlStr)
+	logger.Info("created link", "key", key, "url", urlStr)
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
-func showInterface(w http.ResponseWriter, r *http.Request) {
-	// Get pre-filled key from query params if present
+func showInterface(w http.ResponseWriter, r *http.Request, store *linkStore) {
 	preKey := html.EscapeString(r.URL.Query().Get("key"))
+	links := store.getAll()
 
-	htmlStr := `<!DOCTYPE html>
-	<html lang="en">
-	<head>
-		<meta charset="UTF-8">
-		<title>Go Links</title>
-		<meta name="viewport" content="width=device-width, initial-scale=1">
-		<style>
-			body{font-family:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; max-width:600px; margin:2rem auto; padding:1rem; background:#f4f4f9}
-			.card{background:white; padding:1.5rem; border-radius:8px; box-shadow:0 2px 5px rgba(0,0,0,0.1); margin-bottom:1.5rem}
-			input{width:100%; padding:10px; margin:5px 0 15px; border:1px solid #ddd; border-radius:4px; box-sizing:border-box; font-size:1rem}
-			button{background:#007bff; color:white; border:none; padding:10px; border-radius:4px; cursor:pointer; width:100%; font-size:1rem; font-weight:600}
-			button:hover{background:#0056b3}
-			ul{list-style:none; padding:0}
-			li{padding:10px; border-bottom:1px solid #eee; display:flex; justify-content:space-between; align-items:center}
-			li:last-child{border-bottom:none}
-			a{color:#007bff; text-decoration:none; font-weight:bold}
-			a:hover{text-decoration:underline}
-			.link-key{font-family:monospace; background:#f0f0f0; padding:2px 6px; border-radius:3px}
-			.error{color:#dc3545; font-size:0.9rem; margin-top:-10px; margin-bottom:10px}
-		</style>
-	</head>
-	<body>
-		<h1>🚀 Go Links</h1>
-		<div class="card">
-			<h2>Create New Link</h2>
-			<form method="POST" action="/">
-				<label for="key">Shortcut name (e.g., ytb, docs, gh)</label>
-				<input id="key" name="key" value="` + preKey + `" required placeholder="name" pattern="[a-zA-Z0-9_-]+" maxlength="50">
-				<label for="url">Destination URL</label>
-				<input id="url" type="url" name="url" required placeholder="https://..." maxlength="2048">
-				<button type="submit">Create Link</button>
-			</form>
-		</div>
-		<div class="card">
-			<h2>Active Shortcuts (` + fmt.Sprintf("%d", len(store.Links)) + `)</h2>`
-	
-	if len(store.Links) == 0 {
-		htmlStr += `<p style="color:#666; text-align:center; padding:20px">No links yet. Create your first shortcut above!</p>`
-	} else {
-		htmlStr += `<ul>`
-		store.RLock()
-		for k, v := range store.Links {
-			escapedKey := html.EscapeString(k)
-			escapedURL := html.EscapeString(v)
-			htmlStr += fmt.Sprintf(`<li><span>go/<span class="link-key">%s</span></span> <a href="%s" target="_blank" rel="noopener noreferrer">%s →</a></li>`, escapedKey, escapedURL, escapedURL)
-		}
-		store.RUnlock()
-		htmlStr += `</ul>`
-	}
-	
-	htmlStr += `</div></body></html>`
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write([]byte(htmlStr))
+	w.Write([]byte(renderHTML(preKey, links)))
 }
 
-func loadLinks() error {
+func renderHTML(prefilledKey string, links map[string]string) string {
+	output := `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Go Links</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <style>
+        body{font-family:system-ui,-apple-system,sans-serif;max-width:600px;margin:2rem auto;padding:1rem;background:#f4f4f9}
+        .card{background:#fff;padding:1.5rem;border-radius:8px;box-shadow:0 2px 5px #0000001a;margin-bottom:1.5rem}
+        input{width:100%;padding:10px;margin:5px 0 15px;border:1px solid #ddd;border-radius:4px;box-sizing:border-box}
+        button{background:#007bff;color:#fff;border:none;padding:10px;border-radius:4px;cursor:pointer;width:100%;font-size:1rem}
+        ul{list-style:none;padding:0}
+        li{padding:10px;border-bottom:1px solid #eee;display:flex;justify-content:space-between;align-items:center}
+        a{color:#007bff;text-decoration:none;font-weight:700}
+        .key{font-family:monospace;background:#f0f0f0;padding:2px 6px;border-radius:3px}
+    </style>
+</head>
+<body>
+    <h1>🚀 Go Links</h1>
+    <div class="card">
+        <h2>Create Link</h2>
+        <form method="POST" action="/">
+            <label>Shortcut</label>
+            <input name="key" value="` + prefilledKey + `" required placeholder="name" pattern="[a-zA-Z0-9_-]+">
+            <label>Destination URL</label>
+            <input type="url" name="url" required placeholder="https://...">
+            <button>Create</button>
+        </form>
+    </div>
+    <div class="card">
+        <h2>Shortcuts</h2>`
+
+	if len(links) == 0 {
+		output += `<p style="text-align:center;color:#666">No links yet.</p>`
+	} else {
+		output += `<ul>`
+		for k, v := range links {
+			escK := html.EscapeString(k)
+			escV := html.EscapeString(v)
+			output += fmt.Sprintf(`<li><span>go/<span class="key">%s</span></span><a href="%s" target="_blank">➜</a></li>`, escK, escV)
+		}
+		output += `</ul>`
+	}
+
+	output += `</div>
+</body>
+</html>`
+
+	return output
+}
+
+func loadLinks(dbFile string, store *linkStore) error {
 	f, err := os.Open(dbFile)
 	if err != nil {
 		if os.IsNotExist(err) {
-			// File doesn't exist yet, not an error
-			logger.Info("No existing links file found, starting fresh")
+			logger.Info("no existing links file found, starting fresh")
 			return nil
 		}
-		return fmt.Errorf("failed to open DB file: %w", err)
+		return fmt.Errorf("open links file: %w", err)
 	}
 	defer f.Close()
 
-	store.Lock()
-	defer store.Unlock()
-
-	if err := json.NewDecoder(f).Decode(&store.Links); err != nil {
-		return fmt.Errorf("failed to decode JSON: %w", err)
+	var links map[string]string
+	if err := json.NewDecoder(f).Decode(&links); err != nil && err != io.EOF {
+		return fmt.Errorf("decode links: %w", err)
 	}
 
-	logger.Info("Loaded links from storage", "count", len(store.Links))
+	if links != nil {
+		store.load(links)
+	}
+
 	return nil
 }
 
-func saveLinks() error {
+func saveLinks(dbFile string, store *linkStore) error {
 	f, err := os.Create(dbFile)
 	if err != nil {
-		return fmt.Errorf("failed to create DB file: %w", err)
+		return fmt.Errorf("create links file: %w", err)
 	}
 	defer f.Close()
 
 	encoder := json.NewEncoder(f)
 	encoder.SetIndent("", "  ")
-	
-	store.RLock()
-	defer store.RUnlock()
-	
-	if err := encoder.Encode(store.Links); err != nil {
-		return fmt.Errorf("failed to encode JSON: %w", err)
+
+	links := store.getAll()
+	if err := encoder.Encode(links); err != nil {
+		return fmt.Errorf("encode links: %w", err)
 	}
 
 	return nil
-}
-
-func getEnv(key, defaultValue string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return defaultValue
-}
-
-// loadEnvFile loads environment variables from a .env file
-func loadEnvFile(filename string) {
-	file, err := os.Open(filename)
-	if err != nil {
-		// .env file is optional, not an error if it doesn't exist
-		return
-	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		
-		// Skip empty lines and comments
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		
-		// Parse KEY=VALUE format
-		parts := strings.SplitN(line, "=", 2)
-		if len(parts) == 2 {
-			key := strings.TrimSpace(parts[0])
-			value := strings.TrimSpace(parts[1])
-			
-			// Remove quotes if present
-			value = strings.Trim(value, `"'`)
-			
-			// Only set if not already in environment
-			if os.Getenv(key) == "" {
-				os.Setenv(key, value)
-			}
-		}
-	}
 }
