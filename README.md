@@ -99,4 +99,4 @@ make help           # Show all targets
 
 ## License
 
-MIT
+[MIT](LICENSE)
