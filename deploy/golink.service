@@ -11,8 +11,7 @@ ExecStart=/usr/local/bin/golink
 Restart=always
 RestartSec=5
 
-# Environment configuration (optional, defaults work for most setups)
-# Uncomment and modify if needed:
+# Environment (defaults work for most setups)
 # Environment="PIHOLE_TARGET=http://127.0.0.1:8080"
 # Environment="LISTEN_ADDR=:80"
 # Environment="DB_FILE=go_links.json"

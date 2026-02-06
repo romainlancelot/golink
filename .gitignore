@@ -6,6 +6,7 @@ golink
 
 # Database
 go_links.json
+go_links.json.tmp
 go_links.json.backup
 
 # Go build cache
