@@ -13,10 +13,22 @@ LDFLAGS := -s -w
 
 all: build
 
-## build: Cross-compile for Raspberry Pi (ARMv6)
+## build: Cross-compile for Raspberry Pi (default: ARMv6)
 build:
 	GOOS=$(GOOS) GOARCH=$(GOARCH) GOARM=$(GOARM) go build -ldflags="$(LDFLAGS)" -o $(BINARY) $(MAIN)
-	@echo "Built $(BINARY) for $(GOOS)/$(GOARCH) (ARM v$(GOARM))"
+	@echo "Built $(BINARY) for $(GOOS)/$(GOARCH)$(if $(filter arm,$(GOARCH)), (ARM v$(GOARM)),)"
+
+## build-pi0: Build for Pi Zero / Zero W / 1 (ARMv6)
+build-pi0:
+	$(MAKE) build GOARCH=arm GOARM=6
+
+## build-pi3: Build for Pi 2 / 3 (ARMv7)
+build-pi3:
+	$(MAKE) build GOARCH=arm GOARM=7
+
+## build-pi4: Build for Pi 3 (64-bit) / 4 / 5 (ARM64)
+build-pi4:
+	$(MAKE) build GOARCH=arm64 GOARM=
 
 ## build-local: Build for the current platform
 build-local:

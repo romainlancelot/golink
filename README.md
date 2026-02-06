@@ -15,11 +15,24 @@ A lightweight URL shortener for your local network. Create short links like `go/
 ### Build
 
 ```bash
-# Cross-compile for Raspberry Pi (ARMv6)
+# Cross-compile for Raspberry Pi (default: Pi Zero/1, ARMv6)
 make build
+
+# Or target a specific model
+make build-pi0            # Pi Zero / Zero W / 1 (ARMv6)
+make build-pi3            # Pi 2 / 3 (ARMv7)
+make build-pi4            # Pi 3 64-bit / 4 / 5 (ARM64)
 
 # Or build for your local machine
 make build-local
+```
+
+You can also set the architecture manually:
+
+```bash
+make build GOARCH=arm64              # ARM 64-bit
+make build GOARCH=arm GOARM=7        # ARMv7
+make build GOOS=linux GOARCH=amd64   # x86_64 Linux
 ```
 
 ### Install on Raspberry Pi
