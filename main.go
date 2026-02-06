@@ -417,6 +417,120 @@ func renderHTML(prefilledKey string, links map[string]string) string {
         
         .empty-state{text-align:center;padding:3rem 1rem;color:#6c757d}
         .empty-state-icon{font-size:3rem;margin-bottom:1rem;opacity:0.5}
+        
+        /* Mobile responsive */
+        @media (max-width: 768px) {
+            body{margin:1rem auto;padding:0.5rem}
+            .card{padding:1rem;margin-bottom:1rem}
+            h1{font-size:1.5rem;text-align:center}
+            h2{font-size:1.2rem}
+            
+            /* Hide table headers on mobile */
+            thead{display:none}
+            
+            /* Transform table rows into cards */
+            tbody tr{
+                display:block;
+                margin-bottom:1rem;
+                border:1px solid #dee2e6;
+                border-radius:8px;
+                background:#fff;
+                box-shadow:0 1px 3px rgba(0,0,0,0.1);
+                padding:0;
+            }
+            
+            tbody tr:hover{background:#fff}
+            
+            td{
+                display:block;
+                padding:10px 15px;
+                border:none;
+                text-align:left;
+            }
+            
+            td:before{
+                content:attr(data-label);
+                font-weight:600;
+                color:#495057;
+                display:block;
+                margin-bottom:5px;
+                font-size:0.85rem;
+                text-transform:uppercase;
+                letter-spacing:0.5px;
+            }
+            
+            .shortcut-cell{
+                display:block;
+                width:fit-content;
+                font-size:1rem;
+                padding:6px 10px;
+            }
+            
+            .url-cell{
+                max-width:100%;
+                white-space:normal;
+                word-break:break-all;
+                font-size:0.85rem;
+            }
+            
+            .actions-cell{
+                justify-content:stretch;
+                padding:10px 15px 15px;
+            }
+            
+            .actions-cell:before{display:none}
+            
+            .btn-edit,.btn-delete{
+                flex:1;
+                text-align:center;
+                padding:10px;
+                font-size:0.9rem;
+            }
+            
+            /* Edit form on mobile */
+            .edit-row{
+                display:none;
+                border:none;
+                margin-bottom:1rem;
+                padding:0;
+            }
+            
+            .edit-row td{
+                padding:15px;
+                background:#f8f9fa;
+                border-radius:8px;
+            }
+            
+            .edit-form{
+                flex-direction:column;
+                gap:10px;
+            }
+            
+            .edit-form strong{
+                display:block;
+                margin-bottom:5px;
+                font-size:0.9rem;
+                color:#495057;
+            }
+            
+            .edit-form input{
+                width:100%;
+            }
+            
+            .edit-form button{
+                width:100%;
+                padding:10px;
+            }
+        }
+        
+        @media (max-width: 480px) {
+            body{padding:0.25rem}
+            .card{padding:0.75rem;border-radius:6px}
+            h1{font-size:1.3rem}
+            h2{font-size:1.1rem}
+            input{padding:8px;font-size:0.95rem}
+            button{padding:8px;font-size:0.95rem}
+        }
     </style>
 </head>
 <body>
@@ -457,9 +571,9 @@ func renderHTML(prefilledKey string, links map[string]string) string {
 			escV := html.EscapeString(v)
 			output += fmt.Sprintf(`
                 <tr id="row-%s">
-                    <td><span class="shortcut-cell">go/%s</span></td>
-                    <td class="url-cell"><a href="%s" target="_blank" title="%s">%s</a></td>
-                    <td class="actions-cell">
+                    <td data-label="Shortcut"><span class="shortcut-cell">go/%s</span></td>
+                    <td data-label="Destination" class="url-cell"><a href="%s" target="_blank" title="%s">%s</a></td>
+                    <td data-label="Actions" class="actions-cell">
                         <button class="btn-edit" onclick="editLink('%s')">✏️ Edit</button>
                         <button class="btn-delete" onclick="deleteLink('%s')">🗑️ Delete</button>
                     </td>
